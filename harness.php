@@ -34,6 +34,7 @@ try {
         'job' => ['type' => 'string', 'default' => ''],
         'outdir' => ['type' => 'string', 'default' => __DIR__ . '/artifacts'],
         'keep-on-pass' => ['type' => 'bool'],
+        'print-comparison' => ['type' => 'bool'],
     ]);
 } catch (InvalidArgumentException $e) {
     fwrite(STDERR, "Error: {$e->getMessage()}\n");
@@ -96,6 +97,11 @@ if (!$comparison['match']) {
     fwrite(STDERR, $diff . "\n");
     fwrite(STDERR, "Job/result artifacts available in {$outDir}\n");
     exit(EXIT_MISMATCH);
+}
+
+if ($opts['print-comparison']) {
+    $summary = $comparator->describeMatchSummary();
+    fwrite(STDOUT, formatMatchSummary($summary) . "\n");
 }
 
 if (!$jobProvided && !$opts['keep-on-pass']) {
@@ -188,6 +194,33 @@ function formatDiff(array $comparison, ?array $jobOp): string
     $lines[] = json_encode($comparison['a'], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
     $lines[] = '=== Extension B ===';
     $lines[] = json_encode($comparison['b'], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+
+    return implode("\n", $lines);
+}
+
+/**
+ * @param array{countA: int, countB: int, samples: array<int, array{index: int, a: ?array, b: ?array}>} $summary
+ */
+function formatMatchSummary(array $summary): string
+{
+    $lines = [];
+    $lines[] = sprintf(
+        'Comparison summary: %d result record(s) from extension A vs %d from extension B',
+        $summary['countA'],
+        $summary['countB'],
+    );
+
+    if ($summary['samples'] === []) {
+        $lines[] = 'No result samples available to display.';
+        return implode("\n", $lines);
+    }
+
+    $lines[] = sprintf('Showing first %d matching result(s):', count($summary['samples']));
+    foreach ($summary['samples'] as $sample) {
+        $lines[] = sprintf('  - Result index %d', $sample['index']);
+        $lines[] = '    A: ' . stringifyValue($sample['a']);
+        $lines[] = '    B: ' . stringifyValue($sample['b']);
+    }
 
     return implode("\n", $lines);
 }

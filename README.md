@@ -72,6 +72,8 @@ The harness will:
 Artifacts (job, `{A,B}.res.jsonl`, `diff.txt`) are stored in the chosen outdir.
 Use `--keep-on-pass` to retain them on successful runs. On a mismatch, the harness
 exits with code `1` and prints replay commands you can run manually.
+Add `--print-comparison` to dump a short summary of the matching result streams
+even when the two runs agree, which helps confirm that real data was compared.
 
 Minimal run (defaults)
 ----------------------
