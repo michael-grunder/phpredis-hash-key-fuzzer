@@ -1,0 +1,15 @@
+{
+    "name": "mike/phpredis-hash-key-fuzzer",
+    "autoload": {
+        "psr-4": {
+            "Mike\\PhpredisHashKeyFuzzer\\": "src/"
+        }
+    },
+    "authors": [
+        {
+            "name": "michael-grunder",
+            "email": "michael.grunder@gmail.com"
+        }
+    ],
+    "require": {}
+}
