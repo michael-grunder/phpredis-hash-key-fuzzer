@@ -70,3 +70,19 @@ The harness will:
 Artifacts (job, `{A,B}.res.jsonl`, `diff.txt`) are stored in the chosen outdir.
 Use `--keep-on-pass` to retain them on successful runs. On a mismatch, the harness
 exits with code `1` and prints replay commands you can run manually.
+
+Minimal run (defaults)
+----------------------
+Need the fastest sanity check? Only the extension paths and a seed (or a job path) are required:
+```
+php harness.php \
+    --phpredis-a ./ext/phpredis-master.so \
+    --phpredis-b ./ext/phpredis-pr.so \
+    --seed quickcheck
+```
+All other flags fall back to the baked-in defaults shown above:
+- `127.0.0.1:6379`, database `0`, no auth
+- 500 operations over 200 keys / 50 hashes / 50 fields / 200 values
+- Max 32 keys/fields per op, 32 values per SET
+- 2000 ms runner timeout
+- Artifacts dropped into `./artifacts` (auto-created, wiped on pass unless `--keep-on-pass`)
