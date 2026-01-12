@@ -46,6 +46,7 @@ Differential harness
 --------------------
 ```
 php harness.php \
+    --php /usr/bin/php82 \
     --phpredis-a ./ext/phpredis-a.so \
     --phpredis-b ./ext/phpredis-b.so \
     --seed 42 \
@@ -61,6 +62,7 @@ php harness.php \
     --timeout-ms 2000 \
     --outdir ./artifacts
 ```
+Omit `--php` to use the same PHP binary that runs `harness.php`.
 
 The harness will:
 1. Generate a deterministic job file (unless `--job` is supplied).
@@ -81,6 +83,7 @@ php harness.php \
     --seed quickcheck
 ```
 All other flags fall back to the baked-in defaults shown above:
+- PHP binary running `harness.php` (override with `--php /path/to/php`)
 - `127.0.0.1:6379`, database `0`, no auth
 - 500 operations over 200 keys / 50 hashes / 50 fields / 200 values
 - Max 32 keys/fields per op, 32 values per SET

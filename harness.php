@@ -16,6 +16,7 @@ try {
     $opts = Options::parse($argv, [
         'phpredis-a' => ['type' => 'string', 'required' => true],
         'phpredis-b' => ['type' => 'string', 'required' => true],
+        'php' => ['type' => 'string', 'default' => PHP_BINARY],
         'host' => ['type' => 'string', 'default' => '127.0.0.1'],
         'port' => ['type' => 'int', 'default' => 6379],
         'db' => ['type' => 'int', 'default' => 0],
@@ -46,6 +47,7 @@ if ($opts['job'] === '' && !isset($opts['seed'])) {
 
 $opts['phpredis-a'] = resolve_existing_path($opts['phpredis-a']);
 $opts['phpredis-b'] = resolve_existing_path($opts['phpredis-b']);
+$opts['php'] = resolve_existing_path($opts['php']);
 
 $outDir = resolve_path($opts['outdir']);
 $opts['outdir'] = $outDir;
@@ -70,8 +72,8 @@ $resultA = $outDir . '/A.res.jsonl';
 $resultB = $outDir . '/B.res.jsonl';
 
 try {
-    runRunner($opts, $opts['phpredis-a'], $jobPath, $resultA, 'A');
-    runRunner($opts, $opts['phpredis-b'], $jobPath, $resultB, 'B');
+    runRunner($opts, $opts['phpredis-a'], $jobPath, $resultA, 'A', $opts['php']);
+    runRunner($opts, $opts['phpredis-b'], $jobPath, $resultB, 'B', $opts['php']);
 } catch (RuntimeException $e) {
     fwrite(STDERR, "Runner failure: {$e->getMessage()}\n");
     exit(EXIT_INFRA);
@@ -84,10 +86,14 @@ if (!$comparison['match']) {
     if (!copy($jobPath, $mismatchJob)) {
         fwrite(STDERR, "Warning: unable to copy job to {$mismatchJob}\n");
     }
-    $diff = formatDiff($comparison);
+    $jobOp = null;
+    if ($comparison['index'] !== null) {
+        $jobOp = loadJobOperation($mismatchJob, $comparison['index']);
+    }
+    $diff = formatDiff($comparison, $jobOp);
     $diffPath = $outDir . '/diff.txt';
     file_put_contents($diffPath, $diff . "\n\n" . replayHints($opts, $mismatchJob));
-    fwrite(STDERR, "Mismatch detected at op index {$comparison['index']}.\n");
+    fwrite(STDERR, $diff . "\n");
     fwrite(STDERR, "Job/result artifacts available in {$outDir}\n");
     exit(EXIT_MISMATCH);
 }
@@ -102,13 +108,13 @@ if (!$jobProvided && !$opts['keep-on-pass']) {
 fwrite(STDOUT, "No mismatches detected.\n");
 exit(EXIT_OK);
 
-function runRunner(array $opts, string $extPath, string $jobPath, string $outPath, string $label): void
+function runRunner(array $opts, string $extPath, string $jobPath, string $outPath, string $label, string $phpBinary): void
 {
     if (!is_file($extPath)) {
         throw new RuntimeException("Extension {$extPath} not found");
     }
 
-    $cmd = buildRunnerCommand($opts, $extPath, $jobPath, $outPath);
+    $cmd = buildRunnerCommand($opts, $extPath, $jobPath, $outPath, $phpBinary);
     $descriptor = [
         1 => ['pipe', 'w'],
         2 => ['pipe', 'w'],
@@ -130,7 +136,7 @@ function runRunner(array $opts, string $extPath, string $jobPath, string $outPat
     }
 }
 
-function buildRunnerCommand(array $opts, string $extPath, string $jobPath, string $outPath): string
+function buildRunnerCommand(array $opts, string $extPath, string $jobPath, string $outPath, string $phpBinary): string
 {
     $args = [
         '--ext', $extPath,
@@ -148,7 +154,7 @@ function buildRunnerCommand(array $opts, string $extPath, string $jobPath, strin
     }
 
     $parts = [
-        escapeshellarg(PHP_BINARY),
+        escapeshellarg($phpBinary),
         '--no-php-ini',
         '-d',
         'extension=' . escapeshellarg($extPath),
@@ -162,10 +168,22 @@ function buildRunnerCommand(array $opts, string $extPath, string $jobPath, strin
     return implode(' ', $parts);
 }
 
-function formatDiff(array $comparison): string
+function formatDiff(array $comparison, ?array $jobOp): string
 {
     $lines = [];
-    $lines[] = "Mismatch at op index {$comparison['index']}";
+    $index = $comparison['index'];
+    $lines[] = $index === null ? 'Mismatch detected while comparing result streams' : "Mismatch at op index {$index}";
+    if ($jobOp !== null) {
+        $lines[] = sprintf('Operation %s (job index %d)', $jobOp['op'] ?? 'unknown', $jobOp['i'] ?? -1);
+        $lines[] = 'Arguments:';
+        $lines[] = json_encode($jobOp['args'] ?? new \stdClass(), JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+    } elseif ($index !== null) {
+        $lines[] = 'Operation details unavailable (see mismatch.job.jsonl for full job)';
+    }
+    $lines[] = 'Result diff:';
+    foreach (describeResultDiff($comparison['a'], $comparison['b']) as $diffLine) {
+        $lines[] = '  - ' . $diffLine;
+    }
     $lines[] = '=== Extension A ===';
     $lines[] = json_encode($comparison['a'], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
     $lines[] = '=== Extension B ===';
@@ -174,11 +192,125 @@ function formatDiff(array $comparison): string
     return implode("\n", $lines);
 }
 
+/**
+ * @return array<int, string>
+ */
+function describeResultDiff(?array $a, ?array $b): array
+{
+    if ($a === null && $b === null) {
+        return ['No result records found for either extension'];
+    }
+    if ($a === null) {
+        return ['Extension A has no result for this op'];
+    }
+    if ($b === null) {
+        return ['Extension B has no result for this op'];
+    }
+
+    $lines = buildDiffLines($a, $b, 'result');
+    if ($lines === []) {
+        return ['Result payloads differ but no field-level differences were detected'];
+    }
+
+    return $lines;
+}
+
+/**
+ * @return array<int, string>
+ */
+function buildDiffLines(mixed $a, mixed $b, string $path): array
+{
+    if ($a === $b) {
+        return [];
+    }
+
+    if (is_array($a) && is_array($b)) {
+        $keys = array_unique(array_merge(array_keys($a), array_keys($b)));
+        $lines = [];
+        foreach ($keys as $key) {
+            $childPath = formatDiffPath($path, $key);
+            $hasA = array_key_exists($key, $a);
+            $hasB = array_key_exists($key, $b);
+            if (!$hasA) {
+                $lines[] = sprintf('%s missing in extension A (B=%s)', $childPath, stringifyValue($b[$key]));
+                continue;
+            }
+            if (!$hasB) {
+                $lines[] = sprintf('%s missing in extension B (A=%s)', $childPath, stringifyValue($a[$key]));
+                continue;
+            }
+            $lines = array_merge($lines, buildDiffLines($a[$key], $b[$key], $childPath));
+        }
+
+        return $lines;
+    }
+
+    return [sprintf('%s: A=%s B=%s', $path, stringifyValue($a), stringifyValue($b))];
+}
+
+function formatDiffPath(string $base, int|string $segment): string
+{
+    if ($base === '') {
+        return (string)$segment;
+    }
+
+    if (is_int($segment)) {
+        return "{$base}[{$segment}]";
+    }
+
+    return "{$base}.{$segment}";
+}
+
+function stringifyValue(mixed $value): string
+{
+    $encoded = json_encode($value, JSON_UNESCAPED_UNICODE);
+    if ($encoded === false) {
+        return '(unencodable value)';
+    }
+
+    return $encoded;
+}
+
+function loadJobOperation(string $jobPath, int $targetIndex): ?array
+{
+    if (!is_file($jobPath)) {
+        return null;
+    }
+
+    $fh = fopen($jobPath, 'rb');
+    if (!$fh) {
+        return null;
+    }
+
+    try {
+        while (($line = fgets($fh)) !== false) {
+            $line = trim($line);
+            if ($line === '') {
+                continue;
+            }
+            $decoded = json_decode($line, true);
+            if (!is_array($decoded)) {
+                continue;
+            }
+            if (($decoded['t'] ?? null) !== 'op') {
+                continue;
+            }
+            if ((int)($decoded['i'] ?? -1) === $targetIndex) {
+                return $decoded;
+            }
+        }
+    } finally {
+        fclose($fh);
+    }
+
+    return null;
+}
+
 function replayHints(array $opts, string $jobPath): string
 {
     $base = sprintf(
         "%s --no-php-ini -d extension=%%s %s --ext %%s --host %s --port %d --db %d --job %s --out %%s --timeout-ms %d",
-        escapeshellarg(PHP_BINARY),
+        escapeshellarg($opts['php']),
         escapeshellarg(__DIR__ . '/runner.php'),
         escapeshellarg($opts['host']),
         $opts['port'],
