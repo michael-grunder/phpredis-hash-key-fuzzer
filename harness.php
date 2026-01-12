@@ -92,9 +92,12 @@ if (!$comparison['match']) {
         $jobOp = loadJobOperation($mismatchJob, $comparison['index']);
     }
     $diff = formatDiff($comparison, $jobOp);
+    $harnessCommand = buildHarnessReplayCommand($opts, $mismatchJob);
+    $replayInfo = replayHints($opts, $mismatchJob, $harnessCommand);
     $diffPath = $outDir . '/diff.txt';
-    file_put_contents($diffPath, $diff . "\n\n" . replayHints($opts, $mismatchJob));
+    file_put_contents($diffPath, $diff . "\n\n" . $replayInfo);
     fwrite(STDERR, $diff . "\n");
+    fwrite(STDERR, $replayInfo . "\n");
     fwrite(STDERR, "Job/result artifacts available in {$outDir}\n");
     exit(EXIT_MISMATCH);
 }
@@ -339,7 +342,7 @@ function loadJobOperation(string $jobPath, int $targetIndex): ?array
     return null;
 }
 
-function replayHints(array $opts, string $jobPath): string
+function replayHints(array $opts, string $jobPath, string $harnessCommand): string
 {
     $base = sprintf(
         "%s --no-php-ini -d extension=%%s %s --ext %%s --host %s --port %d --db %d --job %s --out %%s --timeout-ms %d",
@@ -357,11 +360,78 @@ function replayHints(array $opts, string $jobPath): string
     }
 
     $hint = [];
-    $hint[] = 'Replay commands:';
+    $hint[] = 'Runner replay commands:';
     $hint[] = sprintf($base, escapeshellarg($opts['phpredis-a']), escapeshellarg($opts['phpredis-a']), escapeshellarg($opts['outdir'] . '/A.res.jsonl'));
     $hint[] = sprintf($base, escapeshellarg($opts['phpredis-b']), escapeshellarg($opts['phpredis-b']), escapeshellarg($opts['outdir'] . '/B.res.jsonl'));
+    $hint[] = '';
+    $hint[] = 'Harness repro command:';
+    $hint[] = $harnessCommand;
 
     return implode("\n", $hint);
+}
+
+function buildHarnessReplayCommand(array $opts, string $jobPath): string
+{
+    $script = $_SERVER['SCRIPT_FILENAME'] ?? __FILE__;
+    $scriptPath = realpath($script) ?: $script;
+    $parts = [
+        escapeshellarg(PHP_BINARY),
+        escapeshellarg($scriptPath),
+    ];
+
+    $scalarOptions = [
+        'php',
+        'phpredis-a',
+        'phpredis-b',
+        'host',
+        'port',
+        'db',
+        'auth',
+        'seed',
+        'ops',
+        'keyspace',
+        'hashspace',
+        'fields',
+        'values',
+        'max-keys-per-op',
+        'max-fields-per-op',
+        'max-set-per-op',
+        'timeout-ms',
+        'job',
+        'outdir',
+    ];
+
+    foreach ($scalarOptions as $name) {
+        if ($name === 'seed' && !array_key_exists('seed', $opts)) {
+            continue;
+        }
+        if ($name === 'auth' && ($opts['auth'] ?? '') === '') {
+            continue;
+        }
+
+        $value = $opts[$name] ?? '';
+        if ($name === 'job') {
+            $value = $jobPath;
+        }
+        if ($name === 'outdir') {
+            $value = $opts['outdir'];
+        }
+
+        if ($name === 'seed' && is_string($value) && $value === '') {
+            continue;
+        }
+
+        $parts[] = '--' . $name;
+        $parts[] = escapeshellarg((string) $value);
+    }
+
+    foreach (['keep-on-pass', 'print-comparison'] as $flag) {
+        if (!empty($opts[$flag])) {
+            $parts[] = '--' . $flag;
+        }
+    }
+
+    return implode(' ', $parts);
 }
 
 function resolve_path(string $path): string
